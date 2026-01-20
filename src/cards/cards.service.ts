@@ -77,6 +77,12 @@ export class CardsService {
       throw new BadRequestException(`Missing required columns: ${missingColumns.join(', ')}`);
     }
 
+    // Fetch all existing categories for validation
+    const categories = await this.prisma.category.findMany();
+    // Create a map for case-insensitive lookup: lowercase name -> Category object
+    const categoryMap = new Map<string, any>();
+    categories.forEach(cat => categoryMap.set(cat.name.toLowerCase(), cat));
+
     // Validate and sanitize each row
     const errors: string[] = [];
     const validRecords: any[] = [];
@@ -88,14 +94,25 @@ export class CardsService {
       const title = record.title?.trim();
       const imageUrl = (record.imageUrl || record.imageURL || record.image_url)?.trim();
       const content = record.content?.trim();
-      const category = record.category?.trim();
+      const categoryName = record.category?.trim();
 
       if (!title) rowErrors.push('missing title');
       if (!imageUrl) rowErrors.push('missing imageUrl');
       if (!content) rowErrors.push('missing content');
+      if (!categoryName) rowErrors.push('missing category');
 
+      // Validate URL format (basic check)
       if (imageUrl && !this.isValidUrl(imageUrl)) {
         rowErrors.push('invalid imageUrl format');
+      }
+
+      // Validate Category
+      let matchedCategory: any = undefined;
+      if (categoryName) {
+        matchedCategory = categoryMap.get(categoryName.toLowerCase());
+        if (!matchedCategory) {
+          rowErrors.push(`category '${categoryName}' not found`);
+        }
       }
 
       if (rowErrors.length > 0) {
@@ -106,7 +123,8 @@ export class CardsService {
           title: sanitizeHtml(title, sanitizeOptions),
           imageUrl,
           content: sanitizeHtml(content, sanitizeOptions),
-          category: category || 'Uncategorized',
+          category: matchedCategory.name, // Use the official name from DB
+          categoryId: matchedCategory.id, // Link to the relation
           isActive: true,
           overlayOpacity: 0,
           creatorId: creatorId,
@@ -114,40 +132,32 @@ export class CardsService {
       }
     });
 
+    // If all rows have errors, throw
     if (validRecords.length === 0) {
       throw new BadRequestException({
         message: 'All rows failed validation',
-        errors: errors.slice(0, 10),
+        errors: errors.slice(0, 10), // Limit to first 10 errors
         totalErrors: errors.length,
       });
     }
 
-    // Batch insert with transaction for atomicity
-    let totalCreated = 0;
-    try {
-      await this.prisma.$transaction(async (tx) => {
-        // Process in batches
-        for (let i = 0; i < validRecords.length; i += BATCH_SIZE) {
-          const batch = validRecords.slice(i, i + BATCH_SIZE);
-          const result = await tx.card.createMany({
-            data: batch as any,
-          });
-          totalCreated += result.count;
-        }
-      });
-    } catch (dbError: any) {
-      throw new BadRequestException(`Database error: ${dbError.message}`);
-    }
+    // Insert valid records
+    // We cannot use createMany with relations (categoryId) if we want to be strictly safe, 
+    // BUT createMany allows setting foreign keys directly (categoryId), so it DOES works.
+    const result = await this.prisma.card.createMany({
+      data: validRecords as any,
+    });
 
+    // Return detailed result
     return {
       success: true,
-      created: totalCreated,
+      created: result.count,
       total: records.length,
       skipped: errors.length,
       errors: errors.length > 0 ? errors.slice(0, 10) : undefined,
       message: errors.length > 0
-        ? `Created ${totalCreated} cards. ${errors.length} rows had errors.`
-        : `Successfully created ${totalCreated} cards.`,
+        ? `Created ${result.count} cards. ${errors.length} rows had errors.`
+        : `Successfully created ${result.count} cards.`,
     };
   }
 

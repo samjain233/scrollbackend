@@ -18,7 +18,7 @@ export class CardsController {
   }
 
   @Get()
-  @Header('Cache-Control', 'public, max-age=60') // Cache for 1 minute
+  @Header('Cache-Control', 'no-store') // Disable caching for real-time updates
   findAll(
     @Query('page') page: number = 1,
     @Query('limit') limit: number = 10,
