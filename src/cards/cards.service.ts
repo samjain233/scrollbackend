@@ -5,6 +5,7 @@ import { CardCategory } from './entities/card.entity';
 import { PrismaService } from '../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
 import sanitizeHtml from 'sanitize-html';
+import * as crypto from 'crypto';
 
 // XSS sanitization options - strip all HTML tags
 const sanitizeOptions: sanitizeHtml.IOptions = {
@@ -22,6 +23,8 @@ export class CardsService {
     const sanitizedTitle = sanitizeHtml(createCardDto.title, sanitizeOptions);
     const sanitizedContent = sanitizeHtml(createCardDto.content, sanitizeOptions);
 
+    const contentHash = this.generateCardHash(sanitizedTitle, sanitizedContent, createCardDto.categoryId);
+
     return this.prisma.card.create({
       data: {
         title: sanitizedTitle,
@@ -32,6 +35,7 @@ export class CardsService {
         isActive: createCardDto.isActive ?? true,
         overlayOpacity: createCardDto.overlayOpacity ?? 0,
         creator: creatorId ? { connect: { id: creatorId } } : undefined,
+        contentHash,
       },
     });
   }
@@ -132,32 +136,120 @@ export class CardsService {
       }
     });
 
-    // If all rows have errors, throw
+
+
+    // --- Hash-Based Duplicate Prevention ---
+    let recordsToInsert = validRecords;
+    let duplicateCount = 0;
+
+    if (validRecords.length > 0) {
+      // 1. Calculate Hashes for all valid records
+      const recordsWithHashes = validRecords.map(record => {
+        const hash = this.generateCardHash(record.title, record.content, record.categoryId);
+        return { ...record, contentHash: hash };
+      });
+
+      // 0. Deduplicate within the batch (keep first occurrence)
+      const uniqueRecordsMap = new Map<string, any>();
+      recordsWithHashes.forEach(record => {
+        if (!uniqueRecordsMap.has(record.contentHash)) {
+          uniqueRecordsMap.set(record.contentHash, record);
+        }
+      });
+      const uniqueBatchRecords = Array.from(uniqueRecordsMap.values());
+      const intraBatchDuplicates = recordsWithHashes.length - uniqueBatchRecords.length;
+
+      // 1. Fetch existing hashes for the unique batch
+      const newHashes = uniqueBatchRecords.map(r => r.contentHash);
+      const existingCards = await this.prisma.card.findMany({
+        where: { contentHash: { in: newHashes } },
+        select: { contentHash: true }
+      });
+
+      const existingHashSet = new Set(existingCards.map(c => c.contentHash).filter((h): h is string => !!h));
+
+      // 2. Filter out database duplicates
+      recordsToInsert = uniqueBatchRecords.filter(r => !existingHashSet.has(r.contentHash));
+
+      // Total skipped = internal duplicates + database duplicates
+      duplicateCount = (recordsWithHashes.length - uniqueBatchRecords.length) + (uniqueBatchRecords.length - recordsToInsert.length);
+    }
+
+    // If all rows failed validation (no valid records at all)
     if (validRecords.length === 0) {
+      // Save critical alert
+      await this.prisma.alert.create({
+        data: {
+          type: 'CRITICAL',
+          source: 'BULK_IMPORT',
+          message: `Bulk Import Failed: All ${records.length} rows failed validation.`,
+          isRead: false,
+        }
+      });
+
       throw new BadRequestException({
         message: 'All rows failed validation',
-        errors: errors.slice(0, 10), // Limit to first 10 errors
+        errors: errors.slice(0, 10),
         totalErrors: errors.length,
       });
     }
 
-    // Insert valid records
-    // We cannot use createMany with relations (categoryId) if we want to be strictly safe, 
-    // BUT createMany allows setting foreign keys directly (categoryId), so it DOES works.
-    const result = await this.prisma.card.createMany({
-      data: validRecords as any,
-    });
+    // Save warnings for partial failures
+    if (errors.length > 0) {
+      const errorLimit = 10;
+      const alertsToSave = errors.slice(0, errorLimit).map(err => ({
+        type: 'WARNING',
+        source: 'BULK_IMPORT',
+        message: `Bulk Import Warning: ${err}`,
+        isRead: false,
+      }));
+
+      await this.prisma.alert.createMany({
+        data: alertsToSave as any
+      });
+
+      if (errors.length > errorLimit) {
+        await this.prisma.alert.create({
+          data: {
+            type: 'WARNING',
+            source: 'BULK_IMPORT',
+            message: `...and ${errors.length - errorLimit} more errors in this batch.`,
+            isRead: false
+          }
+        });
+      }
+    }
+
+    // Insert valid unique records
+    let resultCount = 0;
+    if (recordsToInsert.length > 0) {
+      const result = await this.prisma.card.createMany({
+        data: recordsToInsert as any,
+      });
+      resultCount = result.count;
+    }
 
     // Return detailed result
+    const successMessage = recordsToInsert.length > 0
+      ? `Successfully created ${resultCount} cards.`
+      : `No new cards created.`;
+
+    const duplicateMessage = duplicateCount > 0
+      ? ` ${duplicateCount} duplicates skipped.`
+      : ``;
+
+    const errorMessage = errors.length > 0
+      ? ` ${errors.length} rows had errors.`
+      : ``;
+
     return {
       success: true,
-      created: result.count,
+      created: resultCount,
       total: records.length,
-      skipped: errors.length,
+      skipped: errors.length + duplicateCount,
+      duplicates: duplicateCount,
       errors: errors.length > 0 ? errors.slice(0, 10) : undefined,
-      message: errors.length > 0
-        ? `Created ${result.count} cards. ${errors.length} rows had errors.`
-        : `Successfully created ${result.count} cards.`,
+      message: `${successMessage}${duplicateMessage}${errorMessage}`,
     };
   }
 
@@ -170,11 +262,12 @@ export class CardsService {
     }
   }
 
-  async findAll(page: number = 1, limit: number = 10, search?: string, category?: CardCategory, isActive?: boolean) {
+  async findAll(page: number = 1, limit: number = 10, search?: string, category?: CardCategory, isActive?: boolean, creatorId?: string) {
     const where: Prisma.CardWhereInput = {
       AND: [
         isActive !== undefined ? { isActive } : {},
         category ? { category } : {},
+        creatorId ? { creatorId } : {},
         search
           ? {
             OR: [
@@ -190,7 +283,15 @@ export class CardsService {
         where,
         skip: (page - 1) * limit,
         take: limit,
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        include: {
+          creator: {
+            select: {
+              name: true,
+              email: true,
+            },
+          },
+        },
       }),
       this.prisma.card.count({ where }),
     ]);
@@ -229,6 +330,19 @@ export class CardsService {
       sanitizedData.content = sanitizeHtml(updateCardDto.content, sanitizeOptions);
     }
 
+    // Recalculate hash if critical fields change
+    if (sanitizedData.title || sanitizedData.content || sanitizedData.categoryId) {
+      const titleToHash = sanitizedData.title || existing.title;
+      const contentToHash = sanitizedData.content || existing.content;
+      // Handle categoryId: if explicit null/undefined in update, handle it? 
+      // Typically updateDto fields are optional. 
+      // If categoryId is NOT in sanitizedData, use existing. 
+      // If it is, use it.
+      const categoryIdToHash = 'categoryId' in sanitizedData ? sanitizedData.categoryId : existing.categoryId;
+
+      sanitizedData.contentHash = this.generateCardHash(titleToHash, contentToHash, categoryIdToHash);
+    }
+
     return this.prisma.card.update({
       where: { id },
       data: sanitizedData,
@@ -244,5 +358,10 @@ export class CardsService {
     return this.prisma.card.delete({
       where: { id },
     });
+  }
+
+  private generateCardHash(title: string, content: string, categoryId: string | null | undefined): string {
+    const dataToHash = `${title}|${content}|${categoryId || ''}`;
+    return crypto.createHash('sha256').update(dataToHash).digest('hex');
   }
 }

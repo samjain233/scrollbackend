@@ -25,11 +25,12 @@ export class CardsController {
     @Query('search') search?: string,
     @Query('category') category?: CardCategory,
     @Query('isActive') isActive?: boolean,
+    @Query('creatorId') creatorId?: string,
   ) {
     // Cap pagination limit to prevent memory issues
     const safePage = Math.max(1, +page || 1);
     const safeLimit = Math.min(100, Math.max(1, +limit || 10));
-    return this.cardsService.findAll(safePage, safeLimit, search, category, isActive);
+    return this.cardsService.findAll(safePage, safeLimit, search, category, isActive, creatorId);
   }
 
   @Get(':id')
