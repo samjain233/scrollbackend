@@ -1,23 +1,36 @@
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import compression from 'compression';
 import helmet from 'helmet';
+import { join } from 'path';
 import { AppModule } from './app.module';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+
+  const uploadsRoot = join(process.cwd(), 'uploads');
+  app.useStaticAssets(uploadsRoot, {
+    prefix: '/uploads/',
+  });
 
   // Security - Enhanced Helmet configuration
   const isProduction = process.env.NODE_ENV === 'production';
-  app.use(helmet({
-    hsts: isProduction ? { maxAge: 31536000, includeSubDomains: true } : false,
-    contentSecurityPolicy: isProduction ? undefined : false,
-  }));
+  app.use(
+    helmet({
+      hsts: isProduction
+        ? { maxAge: 31536000, includeSubDomains: true }
+        : false,
+      contentSecurityPolicy: isProduction ? undefined : false,
+    }),
+  );
 
   // CORS - Restrict to allowed origins
-  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000'];
+  const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [
+    'http://localhost:3000',
+  ];
   app.enableCors({
     origin: allowedOrigins,
     credentials: true,
@@ -27,11 +40,13 @@ async function bootstrap() {
   app.use(compression());
 
   // Validation
-  app.useGlobalPipes(new ValidationPipe({
-    whitelist: true,
-    transform: true,
-    forbidNonWhitelisted: true,
-  }));
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+      forbidNonWhitelisted: true,
+    }),
+  );
 
   // Swagger Documentation - Only in development
   if (process.env.NODE_ENV !== 'production') {

@@ -1,4 +1,8 @@
-import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  BadRequestException,
+  NotFoundException,
+} from '@nestjs/common';
 import { CreateCardDto } from './dto/create-card.dto';
 import { UpdateCardDto } from './dto/update-card.dto';
 import { CardCategory } from './entities/card.entity';
@@ -6,6 +10,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { Prisma } from '@prisma/client';
 import sanitizeHtml from 'sanitize-html';
 import * as crypto from 'crypto';
+import type { Express } from 'express';
+import { promises as fs } from 'fs';
+import { join } from 'path';
+import { randomUUID } from 'crypto';
 
 // XSS sanitization options - strip all HTML tags
 const sanitizeOptions: sanitizeHtml.IOptions = {
@@ -16,14 +24,21 @@ const sanitizeOptions: sanitizeHtml.IOptions = {
 
 @Injectable()
 export class CardsService {
-  constructor(private prisma: PrismaService) { }
+  constructor(private prisma: PrismaService) {}
 
   async create(createCardDto: CreateCardDto, creatorId?: string) {
     // Sanitize user input to prevent XSS
     const sanitizedTitle = sanitizeHtml(createCardDto.title, sanitizeOptions);
-    const sanitizedContent = sanitizeHtml(createCardDto.content, sanitizeOptions);
+    const sanitizedContent = sanitizeHtml(
+      createCardDto.content,
+      sanitizeOptions,
+    );
 
-    const contentHash = this.generateCardHash(sanitizedTitle, sanitizedContent, createCardDto.categoryId);
+    const contentHash = this.generateCardHash(
+      sanitizedTitle,
+      sanitizedContent,
+      createCardDto.categoryId,
+    );
 
     return this.prisma.card.create({
       data: {
@@ -31,7 +46,9 @@ export class CardsService {
         imageUrl: createCardDto.imageUrl,
         content: sanitizedContent,
         category: createCardDto.category || 'Uncategorized',
-        categoryRel: createCardDto.categoryId ? { connect: { id: createCardDto.categoryId } } : undefined,
+        categoryRel: createCardDto.categoryId
+          ? { connect: { id: createCardDto.categoryId } }
+          : undefined,
         isActive: createCardDto.isActive ?? true,
         overlayOpacity: createCardDto.overlayOpacity ?? 0,
         creator: creatorId ? { connect: { id: creatorId } } : undefined,
@@ -62,30 +79,41 @@ export class CardsService {
 
     // Check if file is empty
     if (!records || records.length === 0) {
-      throw new BadRequestException('CSV file is empty or contains only headers');
+      throw new BadRequestException(
+        'CSV file is empty or contains only headers',
+      );
     }
 
     // Enforce row limit
     if (records.length > MAX_ROWS) {
-      throw new BadRequestException(`CSV exceeds maximum ${MAX_ROWS} rows. Your file has ${records.length} rows.`);
+      throw new BadRequestException(
+        `CSV exceeds maximum ${MAX_ROWS} rows. Your file has ${records.length} rows.`,
+      );
     }
 
     // Check for required columns
     const firstRecord = records[0];
     const requiredColumns = ['title', 'content'];
-    const missingColumns = requiredColumns.filter(col => !(col in firstRecord));
-    const hasImageUrl = 'imageUrl' in firstRecord || 'imageURL' in firstRecord || 'image_url' in firstRecord;
+    const missingColumns = requiredColumns.filter(
+      (col) => !(col in firstRecord),
+    );
+    const hasImageUrl =
+      'imageUrl' in firstRecord ||
+      'imageURL' in firstRecord ||
+      'image_url' in firstRecord;
     if (!hasImageUrl) missingColumns.push('imageUrl');
 
     if (missingColumns.length > 0) {
-      throw new BadRequestException(`Missing required columns: ${missingColumns.join(', ')}`);
+      throw new BadRequestException(
+        `Missing required columns: ${missingColumns.join(', ')}`,
+      );
     }
 
     // Fetch all existing categories for validation
     const categories = await this.prisma.category.findMany();
     // Create a map for case-insensitive lookup: lowercase name -> Category object
     const categoryMap = new Map<string, any>();
-    categories.forEach(cat => categoryMap.set(cat.name.toLowerCase(), cat));
+    categories.forEach((cat) => categoryMap.set(cat.name.toLowerCase(), cat));
 
     // Validate and sanitize each row
     const errors: string[] = [];
@@ -96,7 +124,11 @@ export class CardsService {
       const rowErrors: string[] = [];
 
       const title = record.title?.trim();
-      const imageUrl = (record.imageUrl || record.imageURL || record.image_url)?.trim();
+      const imageUrl = (
+        record.imageUrl ||
+        record.imageURL ||
+        record.image_url
+      )?.trim();
       const content = record.content?.trim();
       const categoryName = record.category?.trim();
 
@@ -136,43 +168,53 @@ export class CardsService {
       }
     });
 
-
-
     // --- Hash-Based Duplicate Prevention ---
     let recordsToInsert = validRecords;
     let duplicateCount = 0;
 
     if (validRecords.length > 0) {
       // 1. Calculate Hashes for all valid records
-      const recordsWithHashes = validRecords.map(record => {
-        const hash = this.generateCardHash(record.title, record.content, record.categoryId);
+      const recordsWithHashes = validRecords.map((record) => {
+        const hash = this.generateCardHash(
+          record.title,
+          record.content,
+          record.categoryId,
+        );
         return { ...record, contentHash: hash };
       });
 
       // 0. Deduplicate within the batch (keep first occurrence)
       const uniqueRecordsMap = new Map<string, any>();
-      recordsWithHashes.forEach(record => {
+      recordsWithHashes.forEach((record) => {
         if (!uniqueRecordsMap.has(record.contentHash)) {
           uniqueRecordsMap.set(record.contentHash, record);
         }
       });
       const uniqueBatchRecords = Array.from(uniqueRecordsMap.values());
-      const intraBatchDuplicates = recordsWithHashes.length - uniqueBatchRecords.length;
+      const intraBatchDuplicates =
+        recordsWithHashes.length - uniqueBatchRecords.length;
 
       // 1. Fetch existing hashes for the unique batch
-      const newHashes = uniqueBatchRecords.map(r => r.contentHash);
+      const newHashes = uniqueBatchRecords.map((r) => r.contentHash);
       const existingCards = await this.prisma.card.findMany({
         where: { contentHash: { in: newHashes } },
-        select: { contentHash: true }
+        select: { contentHash: true },
       });
 
-      const existingHashSet = new Set(existingCards.map(c => c.contentHash).filter((h): h is string => !!h));
+      const existingHashSet = new Set(
+        existingCards.map((c) => c.contentHash).filter((h): h is string => !!h),
+      );
 
       // 2. Filter out database duplicates
-      recordsToInsert = uniqueBatchRecords.filter(r => !existingHashSet.has(r.contentHash));
+      recordsToInsert = uniqueBatchRecords.filter(
+        (r) => !existingHashSet.has(r.contentHash),
+      );
 
       // Total skipped = internal duplicates + database duplicates
-      duplicateCount = (recordsWithHashes.length - uniqueBatchRecords.length) + (uniqueBatchRecords.length - recordsToInsert.length);
+      duplicateCount =
+        recordsWithHashes.length -
+        uniqueBatchRecords.length +
+        (uniqueBatchRecords.length - recordsToInsert.length);
     }
 
     // If all rows failed validation (no valid records at all)
@@ -184,7 +226,7 @@ export class CardsService {
           source: 'BULK_IMPORT',
           message: `Bulk Import Failed: All ${records.length} rows failed validation.`,
           isRead: false,
-        }
+        },
       });
 
       throw new BadRequestException({
@@ -197,7 +239,7 @@ export class CardsService {
     // Save warnings for partial failures
     if (errors.length > 0) {
       const errorLimit = 10;
-      const alertsToSave = errors.slice(0, errorLimit).map(err => ({
+      const alertsToSave = errors.slice(0, errorLimit).map((err) => ({
         type: 'WARNING',
         source: 'BULK_IMPORT',
         message: `Bulk Import Warning: ${err}`,
@@ -205,7 +247,7 @@ export class CardsService {
       }));
 
       await this.prisma.alert.createMany({
-        data: alertsToSave as any
+        data: alertsToSave as any,
       });
 
       if (errors.length > errorLimit) {
@@ -214,8 +256,8 @@ export class CardsService {
             type: 'WARNING',
             source: 'BULK_IMPORT',
             message: `...and ${errors.length - errorLimit} more errors in this batch.`,
-            isRead: false
-          }
+            isRead: false,
+          },
         });
       }
     }
@@ -230,17 +272,16 @@ export class CardsService {
     }
 
     // Return detailed result
-    const successMessage = recordsToInsert.length > 0
-      ? `Successfully created ${resultCount} cards.`
-      : `No new cards created.`;
+    const successMessage =
+      recordsToInsert.length > 0
+        ? `Successfully created ${resultCount} cards.`
+        : `No new cards created.`;
 
-    const duplicateMessage = duplicateCount > 0
-      ? ` ${duplicateCount} duplicates skipped.`
-      : ``;
+    const duplicateMessage =
+      duplicateCount > 0 ? ` ${duplicateCount} duplicates skipped.` : ``;
 
-    const errorMessage = errors.length > 0
-      ? ` ${errors.length} rows had errors.`
-      : ``;
+    const errorMessage =
+      errors.length > 0 ? ` ${errors.length} rows had errors.` : ``;
 
     return {
       success: true,
@@ -262,28 +303,104 @@ export class CardsService {
     }
   }
 
-  async findAll(page: number = 1, limit: number = 10, search?: string, category?: CardCategory, isActive?: boolean, creatorId?: string) {
+  async findAll(
+    page: number = 1,
+    limit: number = 10,
+    search?: string,
+    category?: CardCategory,
+    isActive?: boolean,
+    creatorId?: string,
+    sort?: string,
+    searchFields?: 'title' | 'content' | 'all',
+    moderatorId?: string,
+    moderatorReview?: 'pending' | 'reviewed',
+  ) {
+    const sf = searchFields ?? 'title';
+    const searchClause: Prisma.CardWhereInput =
+      search && search.trim().length > 0
+        ? {
+            OR: [
+              ...(sf === 'title' || sf === 'all'
+                ? [
+                    {
+                      title: {
+                        contains: search.trim(),
+                        mode: 'insensitive' as const,
+                      },
+                    },
+                  ]
+                : []),
+              ...(sf === 'content' || sf === 'all'
+                ? [
+                    {
+                      content: {
+                        contains: search.trim(),
+                        mode: 'insensitive' as const,
+                      },
+                    },
+                  ]
+                : []),
+            ],
+          }
+        : {};
+
+    const reviewFilter: Prisma.CardWhereInput =
+      moderatorReview === 'pending' && moderatorId
+        ? {
+            moderatorReviews: {
+              none: { moderatorId },
+            },
+          }
+        : moderatorReview === 'reviewed' && moderatorId
+          ? {
+              moderatorReviews: {
+                some: { moderatorId },
+              },
+            }
+          : {};
+
     const where: Prisma.CardWhereInput = {
       AND: [
         isActive !== undefined ? { isActive } : {},
         category ? { category } : {},
         creatorId ? { creatorId } : {},
-        search
-          ? {
-            OR: [
-              { title: { contains: search, mode: 'insensitive' } },
-            ],
-          }
-          : {},
+        searchClause,
+        reviewFilter,
       ],
     };
+
+    let orderBy: Prisma.CardOrderByWithRelationInput[] = [
+      { createdAt: 'desc' },
+      { id: 'desc' },
+    ];
+    switch (sort) {
+      case 'oldest':
+        orderBy = [{ createdAt: 'asc' }, { id: 'asc' }];
+        break;
+      case 'title_az':
+        orderBy = [{ title: 'asc' }, { id: 'asc' }];
+        break;
+      case 'title_za':
+        orderBy = [{ title: 'desc' }, { id: 'desc' }];
+        break;
+      case 'updated_newest':
+        orderBy = [{ updatedAt: 'desc' }, { id: 'desc' }];
+        break;
+      case 'updated_oldest':
+        orderBy = [{ updatedAt: 'asc' }, { id: 'asc' }];
+        break;
+      case 'newest':
+      default:
+        orderBy = [{ createdAt: 'desc' }, { id: 'desc' }];
+        break;
+    }
 
     const [data, total] = await Promise.all([
       this.prisma.card.findMany({
         where,
         skip: (page - 1) * limit,
         take: limit,
-        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        orderBy,
         include: {
           creator: {
             select: {
@@ -302,6 +419,42 @@ export class CardsService {
       page,
       limit,
     };
+  }
+
+  async uploadCardImage(file: Express.Multer.File, publicBaseUrl: string) {
+    const allowed = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+    if (!allowed.includes(file.mimetype)) {
+      throw new BadRequestException(
+        `Unsupported image type: ${file.mimetype}. Use JPEG, PNG, GIF, or WebP.`,
+      );
+    }
+    const extMap: Record<string, string> = {
+      'image/jpeg': 'jpg',
+      'image/png': 'png',
+      'image/gif': 'gif',
+      'image/webp': 'webp',
+    };
+    const ext = extMap[file.mimetype];
+    const dir = join(process.cwd(), 'uploads', 'card-images');
+    await fs.mkdir(dir, { recursive: true });
+    const filename = `${randomUUID()}.${ext}`;
+    await fs.writeFile(join(dir, filename), file.buffer);
+    const base = publicBaseUrl.replace(/\/+$/, '');
+    const url = `${base}/uploads/card-images/${filename}`;
+    return { url };
+  }
+
+  async markModeratorReview(cardId: string, moderatorId: string) {
+    await this.prisma.card.findUniqueOrThrow({
+      where: { id: cardId },
+    });
+    return this.prisma.moderatorCardReview.upsert({
+      where: {
+        moderatorId_cardId: { moderatorId, cardId },
+      },
+      create: { moderatorId, cardId },
+      update: { reviewedAt: new Date() },
+    });
   }
 
   async findOne(id: string) {
@@ -327,20 +480,34 @@ export class CardsService {
       sanitizedData.title = sanitizeHtml(updateCardDto.title, sanitizeOptions);
     }
     if (updateCardDto.content) {
-      sanitizedData.content = sanitizeHtml(updateCardDto.content, sanitizeOptions);
+      sanitizedData.content = sanitizeHtml(
+        updateCardDto.content,
+        sanitizeOptions,
+      );
     }
 
     // Recalculate hash if critical fields change
-    if (sanitizedData.title || sanitizedData.content || sanitizedData.categoryId) {
+    if (
+      sanitizedData.title ||
+      sanitizedData.content ||
+      sanitizedData.categoryId
+    ) {
       const titleToHash = sanitizedData.title || existing.title;
       const contentToHash = sanitizedData.content || existing.content;
-      // Handle categoryId: if explicit null/undefined in update, handle it? 
-      // Typically updateDto fields are optional. 
-      // If categoryId is NOT in sanitizedData, use existing. 
+      // Handle categoryId: if explicit null/undefined in update, handle it?
+      // Typically updateDto fields are optional.
+      // If categoryId is NOT in sanitizedData, use existing.
       // If it is, use it.
-      const categoryIdToHash = 'categoryId' in sanitizedData ? sanitizedData.categoryId : existing.categoryId;
+      const categoryIdToHash =
+        'categoryId' in sanitizedData
+          ? sanitizedData.categoryId
+          : existing.categoryId;
 
-      sanitizedData.contentHash = this.generateCardHash(titleToHash, contentToHash, categoryIdToHash);
+      sanitizedData.contentHash = this.generateCardHash(
+        titleToHash,
+        contentToHash,
+        categoryIdToHash,
+      );
     }
 
     return this.prisma.card.update({
@@ -360,7 +527,11 @@ export class CardsService {
     });
   }
 
-  private generateCardHash(title: string, content: string, categoryId: string | null | undefined): string {
+  private generateCardHash(
+    title: string,
+    content: string,
+    categoryId: string | null | undefined,
+  ): string {
     const dataToHash = `${title}|${content}|${categoryId || ''}`;
     return crypto.createHash('sha256').update(dataToHash).digest('hex');
   }

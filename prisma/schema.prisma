@@ -25,13 +25,28 @@ model Card {
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
   contentHash  String?
-  
+  moderatorReviews ModeratorCardReview[]
+
   @@index([contentHash])
 
   @@index([title])
   @@index([categoryId])
   @@index([creatorId])
   @@index([isActive])
+}
+
+/// Per-moderator review record: each Admin must review a card independently.
+model ModeratorCardReview {
+  id           String   @id @default(uuid())
+  moderatorId  String
+  moderator    Admin    @relation(fields: [moderatorId], references: [id], onDelete: Cascade)
+  cardId       String
+  card         Card     @relation(fields: [cardId], references: [id], onDelete: Cascade)
+  reviewedAt   DateTime @default(now())
+
+  @@unique([moderatorId, cardId])
+  @@index([moderatorId])
+  @@index([cardId])
 }
 
 model Category {
@@ -49,6 +64,7 @@ model Admin {
   password  String
   name      String
   cards     Card[]
+  moderatorCardReviews ModeratorCardReview[]
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }

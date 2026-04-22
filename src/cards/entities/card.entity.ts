@@ -1,6 +1,6 @@
 export enum CardCategory {
-    HISTORY = 'history',
-    SCIENCE = 'science',
-    GEOGRAPHY = 'geography',
-    ECONOMICS = 'economics',
+  HISTORY = 'history',
+  SCIENCE = 'science',
+  GEOGRAPHY = 'geography',
+  ECONOMICS = 'economics',
 }
