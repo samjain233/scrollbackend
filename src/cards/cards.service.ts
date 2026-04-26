@@ -349,10 +349,11 @@ export class CardsService {
     };
     const total = await this.prisma.card.count({ where: whereCount });
 
+    // Cast to text: Card.id may be uuid or text in DB; avoid `text <> uuid` on NOT IN / join.
     const notIn =
       exclude.length > 0
-        ? Prisma.sql`AND c.id NOT IN (${Prisma.join(
-            exclude.map((id) => Prisma.sql`${id}::uuid`),
+        ? Prisma.sql`AND c.id::text NOT IN (${Prisma.join(
+            exclude.map((id) => Prisma.sql`${id}`),
           )})`
         : Prisma.empty;
 
@@ -364,7 +365,7 @@ export class CardsService {
       SELECT c.id::text AS id
       FROM "Card" c
       LEFT JOIN "DeviceCardImpression" d
-        ON c.id = d."cardId" AND d."deviceId" = ${deviceId}
+        ON c.id::text = d."cardId" AND d."deviceId" = ${deviceId}
       LEFT JOIN "DeviceCategoryAffinity" aff
         ON aff."deviceId" = ${deviceId} AND aff."category" = c."category"
       WHERE c."isActive" = true
