@@ -303,6 +303,197 @@ export class CardsService {
     }
   }
 
+  /** Dwell heuristics (ms): quick skip (headline only) vs engaged read. */
+  private static readonly DWELL_MIN_MS = 200;
+  private static readonly DWELL_MAX_MS = 5 * 60 * 1000;
+  private static readonly DWELL_QUICK_MS = 4000;
+  private static readonly DWELL_ENGAGED_MS = 8000;
+
+  /** Delta applied to [deviceId, category] score; summed per batch, then clamped in DB. */
+  dwellScoreDeltaMs(durationMs: number): number {
+    if (
+      durationMs < CardsService.DWELL_MIN_MS ||
+      durationMs > CardsService.DWELL_MAX_MS
+    ) {
+      return 0;
+    }
+    if (durationMs <= CardsService.DWELL_QUICK_MS) {
+      return -0.12; // likely skim / skip
+    }
+    if (durationMs < CardsService.DWELL_ENGAGED_MS) {
+      return 0.05;
+    }
+    return 0.2; // longer engagement → boost category
+  }
+
+  /**
+   * Fair feed for the user app: order by least recently shown per device, then
+   * by category affinity (learned from dwell), then light randomness for cold start.
+   * Pagination: pass every card id already in the client list as `exclude` (comma in query), not page offset.
+   */
+  async findAllFair(
+    deviceId: string,
+    limit: number,
+    category?: CardCategory,
+    excludeIds: string[] = [],
+  ) {
+    const uuidRe =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const exclude = excludeIds
+      .filter((id) => uuidRe.test(id))
+      .slice(0, 200);
+
+    const whereCount: Prisma.CardWhereInput = {
+      isActive: true,
+      ...(category ? { category } : {}),
+    };
+    const total = await this.prisma.card.count({ where: whereCount });
+
+    const notIn =
+      exclude.length > 0
+        ? Prisma.sql`AND c.id NOT IN (${Prisma.join(
+            exclude.map((id) => Prisma.sql`${id}::uuid`),
+          )})`
+        : Prisma.empty;
+
+    const categorySql = category
+      ? Prisma.sql`AND c."category" = ${category}`
+      : Prisma.empty;
+
+    const idRows = await this.prisma.$queryRaw<{ id: string }[]>(Prisma.sql`
+      SELECT c.id::text AS id
+      FROM "Card" c
+      LEFT JOIN "DeviceCardImpression" d
+        ON c.id = d."cardId" AND d."deviceId" = ${deviceId}
+      LEFT JOIN "DeviceCategoryAffinity" aff
+        ON aff."deviceId" = ${deviceId} AND aff."category" = c."category"
+      WHERE c."isActive" = true
+      ${categorySql}
+      ${notIn}
+      ORDER BY
+        d."lastShownAt" ASC NULLS FIRST,
+        COALESCE(aff."score", 0) DESC,
+        RANDOM(),
+        c."createdAt" DESC,
+        c."id" ASC
+      LIMIT ${limit}
+    `);
+
+    if (idRows.length === 0) {
+      return { data: [], total, page: 1, limit };
+    }
+
+    const orderedIds = idRows.map((r) => r.id);
+    const fullRows = await this.prisma.card.findMany({
+      where: { id: { in: orderedIds } },
+      include: {
+        creator: { select: { name: true, email: true } },
+      },
+    });
+    const byId = new Map(fullRows.map((c) => [c.id, c]));
+    const data = orderedIds
+      .map((id) => byId.get(id))
+      .filter((c): c is NonNullable<typeof c> => c != null);
+
+    return { data, total, page: 1, limit };
+  }
+
+  async recordFairImpressions(deviceId: string, cardIds: string[]) {
+    if (!deviceId || cardIds.length === 0) {
+      return { ok: true as const, updated: 0 };
+    }
+    const uuidRe =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const unique = [...new Set(cardIds.filter((id) => uuidRe.test(id)))].slice(
+      0,
+      50,
+    );
+    if (unique.length === 0) {
+      return { ok: true as const, updated: 0 };
+    }
+    const now = new Date();
+    await this.prisma.$transaction(
+      unique.map((cardId) =>
+        this.prisma.deviceCardImpression.upsert({
+          where: {
+            deviceId_cardId: { deviceId, cardId },
+          },
+          create: { deviceId, cardId, lastShownAt: now },
+          update: { lastShownAt: now },
+        }),
+      ),
+    );
+    return { ok: true as const, updated: unique.length };
+  }
+
+  /**
+   * User-app: record how long each card was in view. Updates per-(device, category) affinity.
+   */
+  async recordDwellEvents(
+    deviceId: string,
+    events: { cardId: string; durationMs: number }[],
+  ) {
+    if (!deviceId?.trim() || !events?.length) {
+      return { ok: true as const, updatedCategories: 0 };
+    }
+    const uuidRe =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+    const capped = events
+      .filter(
+        (e) =>
+          uuidRe.test(e.cardId) &&
+          typeof e.durationMs === 'number' &&
+          Number.isFinite(e.durationMs),
+      )
+      .slice(0, 40);
+    if (capped.length === 0) {
+      return { ok: true as const, updatedCategories: 0 };
+    }
+    const ids = [...new Set(capped.map((e) => e.cardId))];
+    const cards = await this.prisma.card.findMany({
+      where: { id: { in: ids }, isActive: true },
+      select: { id: true, category: true },
+    });
+    const byId = new Map(cards.map((c) => [c.id, c]));
+    const deltaByCategory = new Map<string, number>();
+    for (const e of capped) {
+      const card = byId.get(e.cardId);
+      if (!card) continue;
+      const d = this.dwellScoreDeltaMs(Math.round(e.durationMs));
+      if (d === 0) continue;
+      const prev = deltaByCategory.get(card.category) ?? 0;
+      deltaByCategory.set(card.category, prev + d);
+    }
+    if (deltaByCategory.size === 0) {
+      return { ok: true as const, updatedCategories: 0 };
+    }
+    const did = deviceId.trim();
+    for (const [category, totalDelta] of deltaByCategory) {
+      if (totalDelta === 0) continue;
+      await this.prisma.$executeRaw(Prisma.sql`
+        INSERT INTO "DeviceCategoryAffinity" ("id", "deviceId", "category", "score", "updatedAt")
+        VALUES (
+          gen_random_uuid(),
+          ${did},
+          ${category},
+          GREATEST(-1.0::float, LEAST(1.0::float, ${totalDelta}::float)),
+          NOW()
+        )
+        ON CONFLICT ("deviceId", "category")
+        DO UPDATE SET
+          "score" = GREATEST(
+            -1.0::float,
+            LEAST(1.0::float, "DeviceCategoryAffinity"."score" + ${totalDelta}::float)
+          ),
+          "updatedAt" = NOW()
+      `);
+    }
+    return {
+      ok: true as const,
+      updatedCategories: deltaByCategory.size,
+    };
+  }
+
   async findAll(
     page: number = 1,
     limit: number = 10,
@@ -314,7 +505,34 @@ export class CardsService {
     searchFields?: 'title' | 'content' | 'all',
     moderatorId?: string,
     moderatorReview?: 'pending' | 'reviewed',
+    deviceIdForFair?: string,
+    excludeForFair?: string,
   ) {
+    const sortNorm = (sort ?? 'newest').toLowerCase();
+    if (
+      sortNorm === 'fair' &&
+      !search?.trim() &&
+      !creatorId &&
+      !moderatorReview &&
+      isActive !== false
+    ) {
+      if (!deviceIdForFair || deviceIdForFair.trim().length < 8) {
+        throw new BadRequestException(
+          'deviceId query param is required when sort=fair',
+        );
+      }
+      const excludeIds =
+        excludeForFair
+          ?.split(',')
+          .map((s) => s.trim())
+          .filter(Boolean) ?? [];
+      return this.findAllFair(
+        deviceIdForFair.trim(),
+        Math.min(100, Math.max(1, limit || 10)),
+        category,
+        excludeIds,
+      );
+    }
     const sf = searchFields ?? 'title';
     const searchClause: Prisma.CardWhereInput =
       search && search.trim().length > 0

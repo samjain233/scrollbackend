@@ -48,6 +48,8 @@ export class CardsController {
     @Query('sort') sort?: string,
     @Query('searchFields') searchFields?: 'title' | 'content' | 'all',
     @Query('moderatorReview') moderatorReview?: string,
+    @Query('deviceId') deviceIdForFair?: string,
+    @Query('exclude') excludeForFair?: string,
   ) {
     const mrRaw = (moderatorReview ?? 'all').trim().toLowerCase();
     let moderatorReviewFilter: 'pending' | 'reviewed' | undefined;
@@ -77,7 +79,38 @@ export class CardsController {
       searchFields,
       req.user?.userId,
       moderatorReviewFilter,
+      deviceIdForFair,
+      excludeForFair,
     );
+  }
+
+  /** User-app fair feed: record that this device has surfaced these cards (batch). */
+  @Post('impressions')
+  recordFairImpressions(
+    @Body() body: { deviceId?: string; cardIds?: string[] },
+  ) {
+    if (!body?.deviceId || !Array.isArray(body.cardIds)) {
+      throw new BadRequestException('deviceId and cardIds are required');
+    }
+    return this.cardsService.recordFairImpressions(
+      body.deviceId,
+      body.cardIds,
+    );
+  }
+
+  /** User-app: per-card time in view; server maps to category affinity for future fair order. */
+  @Post('dwell')
+  recordDwell(
+    @Body()
+    body: {
+      deviceId?: string;
+      events?: { cardId: string; durationMs: number }[];
+    },
+  ) {
+    if (!body?.deviceId || !Array.isArray(body?.events)) {
+      throw new BadRequestException('deviceId and events are required');
+    }
+    return this.cardsService.recordDwellEvents(body.deviceId, body.events);
   }
 
   /// Static `review` segment first — avoids routers that mishandle `/:id/review`.

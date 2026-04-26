@@ -26,6 +26,7 @@ model Card {
   updatedAt    DateTime @updatedAt
   contentHash  String?
   moderatorReviews ModeratorCardReview[]
+  deviceImpressions    DeviceCardImpression[]
 
   @@index([contentHash])
 
@@ -47,6 +48,31 @@ model ModeratorCardReview {
   @@unique([moderatorId, cardId])
   @@index([moderatorId])
   @@index([cardId])
+}
+
+/// Per-device feed fairness: which cards the user app has already surfaced (fair rotation order).
+model DeviceCardImpression {
+  id          String   @id @default(uuid())
+  deviceId    String
+  cardId      String
+  lastShownAt DateTime @default(now())
+  card        Card     @relation(fields: [cardId], references: [id], onDelete: Cascade)
+
+  @@unique([deviceId, cardId])
+  @@index([deviceId, lastShownAt])
+}
+
+/// Learned from dwell time: quick-skip vs longer reads, used to order fair feed by category.
+model DeviceCategoryAffinity {
+  id        String   @id @default(uuid())
+  deviceId  String
+  category  String
+  /// Clamped typically to [-1, 1]. Higher = user tends to engage with this category.
+  score     Float    @default(0)
+  updatedAt DateTime @updatedAt
+
+  @@unique([deviceId, category])
+  @@index([deviceId])
 }
 
 model Category {
