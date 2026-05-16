@@ -23,12 +23,13 @@ import { UpdateCardDto } from './dto/update-card.dto';
 import { CardCategory } from './entities/card.entity';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { OptionalJwtAuthGuard } from '../auth/optional-jwt-auth.guard';
+import { AdminRoleGuard } from '../auth/admin-role.guard';
 
 @Controller('cards')
 export class CardsController {
   constructor(private readonly cardsService: CardsService) {}
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AdminRoleGuard)
   @Post()
   create(@Body() createCardDto: CreateCardDto, @Req() req) {
     return this.cardsService.create(createCardDto, req.user.userId);
@@ -58,9 +59,9 @@ export class CardsController {
     else moderatorReviewFilter = undefined;
 
     if (moderatorReviewFilter) {
-      if (!req.user?.userId) {
+      if (!req.user?.userId || req.user.role !== 'admin') {
         throw new UnauthorizedException(
-          'Authentication required when filtering by moderator review status',
+          'Admin authentication required when filtering by moderator review status',
         );
       }
     }
@@ -114,7 +115,7 @@ export class CardsController {
   }
 
   /// Static `review` segment first — avoids routers that mishandle `/:id/review`.
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AdminRoleGuard)
   @Post('review/:id')
   markModeratorReview(@Param('id') id: string, @Req() req) {
     return this.cardsService.markModeratorReview(id, req.user.userId);
@@ -125,13 +126,13 @@ export class CardsController {
     return this.cardsService.findOne(id);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AdminRoleGuard)
   @Patch(':id')
   update(@Param('id') id: string, @Body() updateCardDto: UpdateCardDto) {
     return this.cardsService.update(id, updateCardDto);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AdminRoleGuard)
   @Post('upload-image')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -149,7 +150,7 @@ export class CardsController {
     return this.cardsService.uploadCardImage(file, baseUrl);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AdminRoleGuard)
   @Post('bulk')
   @UseInterceptors(
     FileInterceptor('file', {
@@ -169,7 +170,7 @@ export class CardsController {
     return this.cardsService.createBulk(csvContent, req.user.userId);
   }
 
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(JwtAuthGuard, AdminRoleGuard)
   @Delete(':id')
   remove(@Param('id') id: string) {
     return this.cardsService.remove(id);

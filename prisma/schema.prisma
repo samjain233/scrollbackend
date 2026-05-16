@@ -75,6 +75,18 @@ model DeviceCategoryAffinity {
   @@index([deviceId])
 }
 
+model KnowfyUser {
+  id         String   @id @default(uuid())
+  googleSub  String   @unique
+  email      String?
+  name       String?
+  pictureUrl String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([email])
+}
+
 model Category {
   id          String   @id @default(uuid())
   name        String   @unique
